@@ -45,4 +45,17 @@ if [[ ! -f "$ENV_FILE" ]]; then
 		[[ -z "$via" ]] || printf 'TG_VIA=%s\n' "$via" >>"$ENV_FILE"
 	)
 fi
+# Команда /status: состояние серверов и подключений с сервера управления. Спрашивается один раз, и при обновлении тоже
+if ! grep -q '^PROBE_STATUS_URL=' "$ENV_FILE" && [[ -r /dev/tty ]]; then
+	echo "Команда /status у бота зонда может показывать подключения клиентов и серверы с сервера управления."
+	read -r -p "Адрес состояния, https://<домен кабинета>/probe/status (Enter, чтобы пропустить): " status_url </dev/tty
+	if [[ -n "$status_url" ]]; then
+		read -r -s -p "Токен состояния, как MONITOR_PROBE_TOKEN на сервере управления (ввод скрыт): " status_token </dev/tty
+		echo
+		[[ "$status_url" == https://* && -n "$status_token" ]] || die "нужны адрес https:// и токен"
+		printf 'PROBE_STATUS_URL=%s\nPROBE_STATUS_TOKEN=%s\n' "$status_url" "$status_token" >>"$ENV_FILE"
+	else
+		printf 'PROBE_STATUS_URL=\n' >>"$ENV_FILE" # пусто: больше не спрашивать
+	fi
+fi
 bash "$tmp/install.sh"

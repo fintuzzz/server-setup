@@ -8,6 +8,9 @@ IP-адреса целей в лог и в сообщения не попада�
 
 Если не отвечают цели и контрольные сайты, неполадка у самого зонда: состояние не меняется, тревоги нет.
 Без зависимостей от бота: зонд сообщает и о том, что сервер с ботом перестал отвечать.
+
+Команда /status в чате с ботом зонда (только для TG_CHAT_IDS): что видно из России сейчас и, если задан
+PROBE_STATUS_URL, состояние серверов и подключённых клиентов по данным сервера управления.
 """
 from __future__ import annotations
 
@@ -99,6 +102,8 @@ class Config:
     tg_via: str = ""  # адрес:порт передатчика на узле, если Telegram отсюда закрыт
     targets: tuple[Target, ...] = ()
     state_file: str = ""
+    status_url: str = ""  # /probe/status сервера управления: подключения и серверы для команды /status
+    status_token: str = field(default="", repr=False)
 
     @property
     def all_targets(self) -> tuple[Target, ...]:
@@ -131,7 +136,9 @@ class Config:
                    name=(e.get("PROBE_NAME") or "РФ").strip(), token=token, chats=chats,
                    tg_api=(e.get("TG_API") or "https://api.telegram.org").rstrip("/"), targets=targets,
                    tg_via=(e.get("TG_VIA") or "").strip(),
-                   state_file=(e.get("PROBE_STATE_FILE") or "").strip())
+                   state_file=(e.get("PROBE_STATE_FILE") or "").strip(),
+                   status_url=(e.get("PROBE_STATUS_URL") or "").strip(),
+                   status_token=(e.get("PROBE_STATUS_TOKEN") or "").strip())
 
 
 # ---------- проверка ----------
@@ -265,7 +272,7 @@ def _duration(delta: timedelta) -> str:
 def history_line(tr: Tracker, now: datetime) -> str:
     recent = [o for o in tr.outages if now - o[1] < HISTORY]
     total = sum((o[1] - o[0] for o in recent), timedelta())
-    return f"Сбоев за 7 дней: {len(recent)}" + (f", всего {_duration(total)}." if recent else ".")
+    return f"📈 Сбоев за 7 дней: {len(recent)}" + (f", всего {_duration(total)}" if recent else "")
 
 
 def read_resources(meminfo: str = "/proc/meminfo", loadavg: str = "/proc/loadavg", root: str = "/") -> str:
@@ -294,35 +301,38 @@ def read_resources(meminfo: str = "/proc/meminfo", loadavg: str = "/proc/loadavg
 
 
 def others_line(trackers: dict[str, Tracker], skip: str) -> str:
+    """Раздел «Остальные цели»: строка на цель со значком состояния."""
     items = []
     for name, tr in trackers.items():
         if name == skip:
             continue
         if tr.down:
-            items.append(f"{name} ❌")
+            items.append(f"🔴 {name}: недоступен")
         else:
-            items.append(f"{name} ✅" + (f" {tr.last_ms:.0f} мс" if tr.last_ms is not None else ""))
-    return "Остальные: " + " · ".join(items) + "." if items else ""
+            items.append(f"✅ {name}" + (f": {tr.last_ms:.0f} мс" if tr.last_ms is not None else ""))
+    return "📡 Остальные цели\n" + "\n".join(items) if items else ""
 
 
 def message(cfg: Config, event: str, tr: Tracker, now: datetime, others: str = "", resources: str = "") -> str:
+    """Сообщение в том же виде, что у бота: заголовок со значком, что случилось, разделы через пустую строку."""
     name = tr.target.name if tr.target else "Сервер"
-    where = f"Проверка из точки «{cfg.name}»."
+    kind = KIND_TEXT.get(tr.kind, KIND_TEXT[ERROR])
+    where = f"🛰 Зонд «{cfg.name}»" + (f": {resources}" if resources else "")
     if tr.target and tr.target.host and not is_ip(tr.target.host):  # IP в сообщения не попадает, домен можно
-        where = f"Проверка из точки «{cfg.name}», домен {tr.target.host}."
-    tail = [line for line in (others, history_line(tr, now), f"Зонд: {resources}." if resources else "", where) if line]
+        where += f"\n🌐 Домен: {tr.target.host}"
     if event == "down":
-        lines = [f"🚨 {name} недоступен из России с {_fmt(tr.since)}.", f"{KIND_TEXT.get(tr.kind, KIND_TEXT[ERROR])}.",
-                 f"Неудач подряд: {tr.fails}."]
+        head = [f"🔴 Недоступен из России · {name}", f"С {_fmt(tr.since)}", f"❗ {kind[:1].upper()}{kind[1:]}",
+                f"Неудач подряд: {tr.fails}"]
     elif event == "remind":
-        lines = [f"🚨 {name} по-прежнему недоступен из России, уже {_duration(now - (tr.since or now))} (с {_fmt(tr.since)}).",
-                 f"{KIND_TEXT.get(tr.kind, KIND_TEXT[ERROR])}."]
+        head = [f"🔔 Всё ещё недоступен из России · {name}",
+                f"⏱ Уже {_duration(now - (tr.since or now))}, с {_fmt(tr.since)}", f"❗ {kind[:1].upper()}{kind[1:]}"]
     else:
-        lines = [f"✅ {name} снова доступен из России ({_fmt(now)}), недоступен был с {_fmt(tr.since)}, "
-                 f"{_duration(now - (tr.since or now))}."]
+        head = [f"🟢 Снова доступен из России · {name}",
+                f"⏱ Был недоступен {_duration(now - (tr.since or now))}, с {_fmt(tr.since)} до {_fmt(now)}"]
         if tr.last_ms is not None:
-            lines.append(f"Время ответа сейчас: {tr.last_ms:.0f} мс.")
-    return "\n".join(lines + tail)
+            head.append(f"Время ответа сейчас: {tr.last_ms:.0f} мс")
+    parts = ["\n".join(head), others, history_line(tr, now), where]
+    return "\n\n".join(part for part in parts if part)
 
 
 # ---------- Telegram ----------
@@ -354,6 +364,96 @@ def send(cfg: Config, chat: int, text: str, opener=urllib.request.urlopen) -> bo
         except Exception as e:  # noqa: BLE001  в тексте ошибки может быть адрес с токеном: пишем только класс
             log.warning("Telegram недоступен: %s", type(e).__name__)
     return False
+
+
+def tg_call(cfg: Config, method: str, payload: dict, timeout: float, opener=urllib.request.urlopen) -> dict | None:  # noqa: ANN001
+    """Вызов Bot API с ответом: передатчик, затем прямой путь. Ошибка: None, в лог только класс ошибки."""
+    req = urllib.request.Request(f"{cfg.tg_api}/bot{cfg.token}/{method}", data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json"})
+    for way in ([via_opener(cfg.tg_via)] if cfg.tg_via else []) + [opener]:
+        try:
+            with way(req, timeout=timeout) as resp:
+                if resp.status == 200:
+                    return json.loads(resp.read())
+        except Exception as e:  # noqa: BLE001  в тексте ошибки может быть адрес с токеном
+            log.warning("Telegram недоступен (%s): %s", method, type(e).__name__)
+    return None
+
+
+# ---------- команды ----------
+POLL_TIMEOUT = 20  # секунд длинного опроса: передатчик на узле держит соединение до 60 с без данных
+COMMAND_MAX_AGE = 600  # команды старше 10 минут (пока зонд или Telegram были недоступны) не выполняются
+HELP_TEXT = ("🛰 Зонд в России\n/status — что видно из России сейчас: узел, кабинет, задержка, "
+             "подключения клиентов и серверы по данным сервера управления")
+
+
+def fetch_control(cfg: Config, opener=urllib.request.urlopen) -> str:  # noqa: ANN001
+    """Разделы состояния от сервера управления. Не ответил: строка с видом сбоя, чтобы /status всё равно пришёл."""
+    if not cfg.status_url:
+        return ""
+    req = urllib.request.Request(cfg.status_url, headers={"Authorization": f"Bearer {cfg.status_token}",
+                                                          "User-Agent": "awg-probe"})
+    try:
+        with opener(req, timeout=10) as resp:
+            text = str(json.loads(resp.read()).get("text") or "").strip()
+            return text or "⚠️ Сервер управления не прислал данных"
+    except urllib.error.HTTPError as e:
+        kind = "адрес не найден: проверьте MONITOR_PROBE_IP и токен" if e.code == 404 else f"код {e.code}"
+        return f"⚠️ Сервер управления не ответил: {kind}"
+    except (OSError, ValueError, AttributeError) as e:
+        return f"⚠️ Сервер управления не ответил: {type(e).__name__}"
+
+
+def status_message(cfg: Config, trackers: dict[str, Tracker], now: datetime, resources: str = "",
+                   control: str = "") -> str:
+    """Ответ на /status: проверки из России, данные сервера управления, сбои за 7 дней, ресурсы зонда."""
+    checks = []
+    for name, tr in trackers.items():
+        if tr.down:
+            checks.append(f"🔴 {name}: недоступен с {_fmt(tr.since)}, {KIND_TEXT.get(tr.kind, KIND_TEXT[ERROR])}")
+        elif tr.fails:
+            checks.append(f"⚠️ {name}: не ответил {tr.fails} раз подряд")
+        elif tr.last_ms is None:
+            checks.append(f"⏳ {name}: ещё не проверялся")
+        else:
+            checks.append(f"✅ {name}: {tr.last_ms:.0f} мс")
+    history = []
+    for name, tr in trackers.items():
+        recent = [o for o in tr.outages if now - o[1] < HISTORY]
+        history.append(f"{name} {len(recent)}")
+    parts = [f"📋 Состояние · зонд «{cfg.name}»\n{_fmt(now)}", "📡 Проверки из России\n" + "\n".join(checks), control,
+             "📈 Сбоев за 7 дней: " + ", ".join(history), f"🛰 Зонд: {resources}" if resources else ""]
+    return "\n\n".join(part for part in parts if part)
+
+
+def handle_updates(cfg: Config, updates: list, offset: int, now: datetime, reply) -> int:  # noqa: ANN001
+    """Команды из чатов TG_CHAT_IDS; остальным зонд не отвечает. Возвращает следующий offset."""
+    for upd in updates:
+        offset = max(offset, int(upd.get("update_id", 0)) + 1)
+        msg = upd.get("message") or {}
+        chat = (msg.get("chat") or {}).get("id")
+        if chat not in cfg.chats or now.timestamp() - float(msg.get("date") or 0) > COMMAND_MAX_AGE:
+            continue
+        words = (msg.get("text") or "").split()
+        command = words[0].split("@", 1)[0].lower() if words else ""
+        if command in ("/status", "/статус"):
+            reply(chat, "status")
+        elif command in ("/start", "/help"):
+            reply(chat, "help")
+    return offset
+
+
+def poll_commands(cfg: Config, offset: int, timeout: float, answer, caller=tg_call) -> int:  # noqa: ANN001
+    """Один длинный опрос Telegram. answer(kind) строит текст ответа. Telegram недоступен: offset прежний."""
+    res = caller(cfg, "getUpdates", {"offset": offset, "timeout": int(timeout), "allowed_updates": ["message"]},
+                 timeout + 10)
+    if not res or not res.get("ok"):
+        return offset
+
+    def reply(chat: int, kind: str) -> None:
+        caller(cfg, "sendMessage", {"chat_id": chat, "text": answer(kind)}, 15)
+
+    return handle_updates(cfg, res.get("result") or [], offset, datetime.now(timezone.utc), reply)
 
 
 def flush(cfg: Config, pending: list[tuple[int, str]], sender=send) -> None:  # noqa: ANN001
@@ -467,11 +567,19 @@ def main(argv: list[str]) -> int:
     signal.signal(signal.SIGINT, _stop)
     if "--test-message" in argv:  # проверка связки с Telegram при установке
         names = ", ".join(t.name for t in cfg.all_targets)
-        ok = all(send(cfg, c, f"Зонд «{cfg.name}» установлен и проверяет: {names}.") for c in cfg.chats)
+        ok = all(send(cfg, c, f"🛰 Зонд «{cfg.name}» установлен\nПроверяет: {names}") for c in cfg.chats)
         return 0 if ok else 1
     trackers, pending = make_trackers(cfg), []
     load_saved(cfg, trackers)
     log.info("зонд запущен: целей %d, интервал %.0f с", len(trackers), cfg.interval)
+    offset = 0
+
+    def answer(kind: str) -> str:
+        if kind == "help":
+            return HELP_TEXT
+        now = datetime.now(timezone.utc)
+        return status_message(cfg, trackers, now, read_resources(), fetch_control(cfg))
+
     while not stop:
         step_all(cfg, trackers, pending, datetime.now(timezone.utc))
         flush(cfg, pending)
@@ -483,7 +591,14 @@ def main(argv: list[str]) -> int:
             pass
         deadline = time.monotonic() + cfg.interval
         while not stop and time.monotonic() < deadline:
-            time.sleep(min(1.0, deadline - time.monotonic()))
+            left = deadline - time.monotonic()
+            if left < 3:
+                time.sleep(max(0.0, left))
+                continue
+            started = time.monotonic()
+            offset = poll_commands(cfg, offset, min(POLL_TIMEOUT, left - 1), answer)
+            if time.monotonic() - started < 1:  # Telegram ответил ошибкой сразу: не крутим опрос впустую
+                time.sleep(min(3.0, max(0.0, deadline - time.monotonic())))
     return 0
 
 
